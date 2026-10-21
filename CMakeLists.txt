@@ -1,6 +1,6 @@
 # Builds the collective communication library, examples, and tests.
 # Supports strict warnings and optional runtime error detection.
-# Registers Python-driven integration tests for the C++ TCP implementation.
+# Includes process-based integration tests and threaded transport checks.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -63,6 +63,7 @@ include(CTest)
 
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_package(Threads REQUIRED)
 
     add_executable(reference_test tests/reference_test.cpp)
     target_link_libraries(reference_test PRIVATE collective)
@@ -70,8 +71,16 @@ if(BUILD_TESTING)
     add_executable(socket_test tests/socket_test.cpp)
     target_link_libraries(socket_test PRIVATE collective)
 
+    add_executable(tcp_transfer_test tests/tcp_transfer_test.cpp)
+    target_link_libraries(
+        tcp_transfer_test PRIVATE
+        collective
+        Threads::Threads
+    )
+
     add_test(NAME reference_sum COMMAND reference_test)
     add_test(NAME socket_ownership COMMAND socket_test)
+    add_test(NAME tcp_transfer COMMAND tcp_transfer_test)
 
     add_test(
         NAME tcp_integration
@@ -84,6 +93,7 @@ if(BUILD_TESTING)
     set_tests_properties(
         reference_sum
         socket_ownership
+        tcp_transfer
         PROPERTIES TIMEOUT 30
     )
 
