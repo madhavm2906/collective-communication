@@ -1,0 +1,53 @@
+{
+  "created_utc": "2026-10-21T15:29:28.508978+00:00",
+  "git_revision": "3f8a77f3a246428ddbafa670ea77da456ee912ec",
+  "working_tree_clean": true,
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "cpu_model": "12th Gen Intel(R) Core(TM) i7-12650H",
+  "logical_cpu_count": 16,
+  "allowed_cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "python_version": "3.12.3",
+  "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+  "build_type": "Release",
+  "cxx_flags": "",
+  "release_flags": "-O3 -DNDEBUG",
+  "sanitizers": "OFF",
+  "binary_sha256": "02cc688152686dbf3d7ccca8a09b7bfb72983bec65f06076f281634514d06a5e",
+  "configuration": {
+    "build_dir": "build/release",
+    "ranks": [
+      2,
+      4,
+      8
+    ],
+    "elements": [
+      1024,
+      8192,
+      131072,
+      524288
+    ],
+    "warmup": 10,
+    "iterations": 100,
+    "runs": 3,
+    "output": "results/baseline-matrix-v1"
+  },
+  "measurement": "Maximum per-rank allreduce_sum elapsed time per iteration. Startup, input preparation, synchronization, and output verification excluded. Local loopback; no CPU pinning.",
+  "percentile_definition": "nearest-rank"
+}

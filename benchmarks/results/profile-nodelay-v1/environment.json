@@ -1,0 +1,48 @@
+{
+  "created_utc": "2026-10-21T15:44:40.132029+00:00",
+  "git_revision": "6c7865e74684d798470bdca2db27c6b09c07407e",
+  "working_tree_clean": true,
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "cpu_model": "12th Gen Intel(R) Core(TM) i7-12650H",
+  "logical_cpu_count": 16,
+  "allowed_cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "python_version": "3.12.3",
+  "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+  "build_type": "Release",
+  "cxx_flags": "",
+  "release_flags": "-O3 -DNDEBUG",
+  "sanitizers": "OFF",
+  "binary_sha256": "56adcdfceaf810807dee50a51bb8a6c62d5f9d68b6a92b0f6f9926a312c5ae8c",
+  "configuration": {
+    "build_dir": "build/release",
+    "ranks": [
+      8
+    ],
+    "elements": [
+      1024
+    ],
+    "warmup": 2,
+    "iterations": 10,
+    "runs": 1,
+    "output": "results/profile-nodelay-v1"
+  },
+  "measurement": "Maximum per-rank allreduce_sum elapsed time per iteration. Startup, input preparation, synchronization, and output verification excluded. Local loopback; no CPU pinning.",
+  "percentile_definition": "nearest-rank"
+}

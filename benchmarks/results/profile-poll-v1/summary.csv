@@ -1,0 +1,2 @@
+ranks,elements,payload_bytes,run,samples,median_us,p95_us,min_us,max_us
+8,1024,8192,1,10,14528.074,15350.693,13545.836,15350.693
