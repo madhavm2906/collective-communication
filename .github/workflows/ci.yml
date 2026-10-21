@@ -1,0 +1,114 @@
+# Build and test the project on every push and pull request.
+# Check two compilers, sanitizer builds, and an optimized Release build.
+# Preserve diagnostic logs even when configuration, compilation, or tests fail.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-debug-sanitizers
+            compiler: g++
+            build_type: Debug
+            sanitizers: "ON"
+
+          - name: clang-debug-sanitizers
+            compiler: clang++
+            build_type: Debug
+            sanitizers: "ON"
+
+          - name: gcc-release
+            compiler: g++
+            build_type: Release
+            sanitizers: "OFF"
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CXX: ${{ matrix.compiler }}
+      LC_ALL: C
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            ninja-build \
+            python3
+
+      - name: Record environment
+        run: |
+          {
+            uname -a
+            "$CXX" --version
+            cmake --version
+            ninja --version
+            python3 --version
+          } > environment.txt
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci -G Ninja \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
+            -DCOLLECTIVE_ENABLE_SANITIZERS="${{ matrix.sanitizers }}" \
+            2>&1 | tee configure.log
+
+      - name: Build
+        run: |
+          cmake --build build/ci --parallel 2 \
+            2>&1 | tee build.log
+
+      - name: Test
+        run: |
+          ctest --test-dir build/ci \
+            --output-on-failure \
+            --output-junit "$GITHUB_WORKSPACE/test-results.xml" \
+            2>&1 | tee test.log
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-${{ matrix.name }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            environment.txt
+            configure.log
+            build.log
+            test.log
+            test-results.xml
+            build/ci/Testing/Temporary/LastTest.log
+            build/ci/Testing/Temporary/LastTestsFailed.log
