@@ -1,5 +1,6 @@
 # Builds the collective communication library, examples, and tests.
-# Includes reference checks, TCP transport tests, and independent-process rings.
+# Includes TCP transport, ring topology, and floating-point ring all-reduce.
+# Threads support concurrent sending and receiving during reduction rounds.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -16,6 +17,8 @@ option(
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
     OFF
 )
+
+find_package(Threads REQUIRED)
 
 add_library(collective_options INTERFACE)
 
@@ -50,11 +53,17 @@ add_library(
     src/reference.cpp
     src/tcp.cpp
     src/ring.cpp
+    src/allreduce.cpp
 )
 
 target_compile_definitions(collective PRIVATE _GNU_SOURCE)
 target_include_directories(collective PUBLIC include)
-target_link_libraries(collective PUBLIC collective_options)
+
+target_link_libraries(
+    collective PUBLIC
+    collective_options
+    Threads::Threads
+)
 
 add_executable(connection_demo examples/connection_demo.cpp)
 target_link_libraries(connection_demo PRIVATE collective)
@@ -62,11 +71,13 @@ target_link_libraries(connection_demo PRIVATE collective)
 add_executable(ring_demo examples/ring_demo.cpp)
 target_link_libraries(ring_demo PRIVATE collective)
 
+add_executable(allreduce_demo examples/allreduce_demo.cpp)
+target_link_libraries(allreduce_demo PRIVATE collective)
+
 include(CTest)
 
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    find_package(Threads REQUIRED)
 
     add_executable(reference_test tests/reference_test.cpp)
     target_link_libraries(reference_test PRIVATE collective)
@@ -75,11 +86,7 @@ if(BUILD_TESTING)
     target_link_libraries(socket_test PRIVATE collective)
 
     add_executable(tcp_transfer_test tests/tcp_transfer_test.cpp)
-    target_link_libraries(
-        tcp_transfer_test PRIVATE
-        collective
-        Threads::Threads
-    )
+    target_link_libraries(tcp_transfer_test PRIVATE collective)
 
     add_test(NAME reference_sum COMMAND reference_test)
     add_test(NAME socket_ownership COMMAND socket_test)
@@ -101,6 +108,14 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:ring_demo>"
     )
 
+    add_test(
+        NAME allreduce_integration
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/allreduce_integration_test.py"
+            "$<TARGET_FILE:allreduce_demo>"
+    )
+
     set_tests_properties(
         reference_sum
         socket_ownership
@@ -116,5 +131,10 @@ if(BUILD_TESTING)
     set_tests_properties(
         ring_integration
         PROPERTIES TIMEOUT 120 ENVIRONMENT "LC_ALL=C"
+    )
+
+    set_tests_properties(
+        allreduce_integration
+        PROPERTIES TIMEOUT 240 ENVIRONMENT "LC_ALL=C"
     )
 endif()
