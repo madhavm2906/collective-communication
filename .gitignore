@@ -1,0 +1,4 @@
+# Exclude generated build files and local editor settings from version control.
+/build/
+/build-*/
+/.vscode/
