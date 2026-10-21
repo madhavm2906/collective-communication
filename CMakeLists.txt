@@ -1,6 +1,5 @@
-# Builds the collective communication library, examples, and tests.
-# Includes numerical correctness, transport stress, topology checks,
-# and controlled failures during active collective operations.
+# Builds the library, demonstrations, benchmark, and automated tests.
+# The benchmark rejects unoptimized or sanitizer-enabled execution.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -73,6 +72,17 @@ target_link_libraries(ring_demo PRIVATE collective)
 
 add_executable(allreduce_demo examples/allreduce_demo.cpp)
 target_link_libraries(allreduce_demo PRIVATE collective)
+
+add_executable(
+    allreduce_benchmark
+    benchmarks/allreduce_benchmark.cpp
+)
+target_link_libraries(allreduce_benchmark PRIVATE collective)
+
+target_compile_definitions(
+    allreduce_benchmark PRIVATE
+    COLLECTIVE_BENCHMARK_SANITIZERS=$<BOOL:${COLLECTIVE_ENABLE_SANITIZERS}>
+)
 
 include(CTest)
 

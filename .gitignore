@@ -1,4 +1,8 @@
-# Exclude generated build files and local editor settings from version control.
+# Exclude generated builds, editor settings, Python caches,
+# and raw experiment directories.
 /build/
 /build-*/
 /.vscode/
+/results/
+__pycache__/
+*.pyc
