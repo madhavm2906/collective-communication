@@ -1,6 +1,5 @@
 # Builds the collective communication library, examples, and tests.
-# Supports strict warnings and optional runtime error detection.
-# Includes process-based integration tests and threaded transport checks.
+# Includes reference checks, TCP transport tests, and independent-process rings.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -50,6 +49,7 @@ add_library(
     collective STATIC
     src/reference.cpp
     src/tcp.cpp
+    src/ring.cpp
 )
 
 target_compile_definitions(collective PRIVATE _GNU_SOURCE)
@@ -58,6 +58,9 @@ target_link_libraries(collective PUBLIC collective_options)
 
 add_executable(connection_demo examples/connection_demo.cpp)
 target_link_libraries(connection_demo PRIVATE collective)
+
+add_executable(ring_demo examples/ring_demo.cpp)
+target_link_libraries(ring_demo PRIVATE collective)
 
 include(CTest)
 
@@ -90,6 +93,14 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:connection_demo>"
     )
 
+    add_test(
+        NAME ring_integration
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/ring_integration_test.py"
+            "$<TARGET_FILE:ring_demo>"
+    )
+
     set_tests_properties(
         reference_sum
         socket_ownership
@@ -100,5 +111,10 @@ if(BUILD_TESTING)
     set_tests_properties(
         tcp_integration
         PROPERTIES TIMEOUT 60 ENVIRONMENT "LC_ALL=C"
+    )
+
+    set_tests_properties(
+        ring_integration
+        PROPERTIES TIMEOUT 120 ENVIRONMENT "LC_ALL=C"
     )
 endif()
