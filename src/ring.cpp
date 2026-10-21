@@ -1,11 +1,14 @@
 /*
  * Builds a ring from pre-existing loopback listeners.
  *
- * Every rank first connects to its successor, then accepts its predecessor.
- * All listeners already exist, so connections can queue while ranks start.
+ * Every rank connects to its successor and accepts its predecessor.
+ * A network-order handshake validates the predecessor's identity.
  *
- * A fixed-size, network-order handshake validates protocol compatibility
- * and the predecessor's rank and group size.
+ * TCP_NODELAY is enabled on both connected sockets to disable Nagle
+ * buffering for the ring's latency-sensitive messages.
+ *
+ * This setting is being evaluated against the recorded baseline.
+ * It does not change the ring algorithm or its wire protocol.
  */
 
 #include "collective/ring.hpp"
@@ -13,11 +16,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 namespace collective {
 namespace {
@@ -64,6 +71,24 @@ void validate_configuration(
     }
 }
 
+void enable_tcp_nodelay(const Socket& socket) {
+    const int enabled = 1;
+
+    if (::setsockopt(
+            socket.native_handle(),
+            IPPROTO_TCP,
+            TCP_NODELAY,
+            &enabled,
+            sizeof(enabled)) == -1) {
+        const int error = errno;
+
+        throw std::system_error(
+            error,
+            std::generic_category(),
+            "enabling TCP_NODELAY on ring connection");
+    }
+}
+
 void exchange_identity(
     const Socket& incoming,
     const Socket& outgoing,
@@ -77,8 +102,8 @@ void exchange_identity(
         htonl(static_cast<std::uint32_t>(world_size)),
     };
 
-    // Only 16 bytes are sent before receiving. Bulk ring traffic will
-    // require concurrent sending and receiving to avoid deadlocks.
+    // Bulk ring traffic uses concurrent sending and receiving.
+    // This handshake sends only one small, fixed-size identity.
     send_all(
         outgoing,
         identity.data(),
@@ -138,6 +163,10 @@ Ring connect_ring(
 
     auto outgoing = connect_loopback(ports[next_rank], timeout);
     auto incoming = accept_connection(listener, timeout);
+
+    // Configure both connections explicitly before exchanging ring traffic.
+    enable_tcp_nodelay(outgoing);
+    enable_tcp_nodelay(incoming);
 
     exchange_identity(
         incoming,
