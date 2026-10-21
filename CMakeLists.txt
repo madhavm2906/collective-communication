@@ -45,10 +45,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 
-add_library(collective STATIC src/reference.cpp)
+# Build both the reference reduction and TCP connection implementation.
+add_library(
+    collective STATIC
+    src/reference.cpp
+    src/tcp.cpp
+)
+
+# Enable Linux declarations such as accept4 explicitly.
+target_compile_definitions(collective PRIVATE _GNU_SOURCE)
 
 target_include_directories(collective PUBLIC include)
 target_link_libraries(collective PUBLIC collective_options)
+# Build the executable used to exercise two-process TCP connections.
+add_executable(connection_demo examples/connection_demo.cpp)
+target_link_libraries(connection_demo PRIVATE collective)
 
 include(CTest)
 

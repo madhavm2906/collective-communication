@@ -16,6 +16,7 @@
 
 #include <sys/socket.h>
 #include <unistd.h>
+#include <stdexcept>
 
 namespace collective {
 
@@ -60,6 +61,20 @@ public:
 
         return Socket(fd);
     }
+
+    /*
+ * Take ownership of a descriptor returned by a successful system call.
+ *
+ * The caller must exclusively own this descriptor and must not close it
+ * after handing it to this function.
+ */
+[[nodiscard]] static Socket adopt(int fd) {
+    if (fd < 0) {
+        throw std::invalid_argument("cannot adopt a negative descriptor");
+    }
+
+    return Socket(fd);
+}
 
     // Borrow the descriptor without transferring ownership.
     // Callers must not close this descriptor themselves.
