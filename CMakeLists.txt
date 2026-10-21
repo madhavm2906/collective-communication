@@ -1,5 +1,6 @@
-# Builds the reference library and its automated tests.
-# Enables strict warnings and optional runtime memory/undefined-behavior checks.
+# Builds the collective communication library, examples, and tests.
+# Supports strict warnings and optional runtime error detection.
+# Registers Python-driven integration tests for the C++ TCP implementation.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -45,26 +46,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 
-# Build both the reference reduction and TCP connection implementation.
 add_library(
     collective STATIC
     src/reference.cpp
     src/tcp.cpp
 )
 
-# Enable Linux declarations such as accept4 explicitly.
 target_compile_definitions(collective PRIVATE _GNU_SOURCE)
-
 target_include_directories(collective PUBLIC include)
 target_link_libraries(collective PUBLIC collective_options)
-# Build the executable used to exercise two-process TCP connections.
+
 add_executable(connection_demo examples/connection_demo.cpp)
 target_link_libraries(connection_demo PRIVATE collective)
 
 include(CTest)
 
-# Build and register the reference and Linux socket ownership tests.
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
     add_executable(reference_test tests/reference_test.cpp)
     target_link_libraries(reference_test PRIVATE collective)
 
@@ -74,9 +73,22 @@ if(BUILD_TESTING)
     add_test(NAME reference_sum COMMAND reference_test)
     add_test(NAME socket_ownership COMMAND socket_test)
 
+    add_test(
+        NAME tcp_integration
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/tcp_integration_test.py"
+            "$<TARGET_FILE:connection_demo>"
+    )
+
     set_tests_properties(
         reference_sum
         socket_ownership
         PROPERTIES TIMEOUT 30
+    )
+
+    set_tests_properties(
+        tcp_integration
+        PROPERTIES TIMEOUT 60 ENVIRONMENT "LC_ALL=C"
     )
 endif()

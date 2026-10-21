@@ -1,14 +1,17 @@
 /*
- * Implements nonblocking TCP listening, acceptance, and connection.
+ * Implements nonblocking TCP connections and complete byte transfers.
  *
- * Uses a steady-clock deadline so interrupted waits do not restart the
- * timeout. Handles pending connections and checks their final socket error.
+ * Uses poll() and steady-clock deadlines for bounded waiting.
+ * Retries interrupted operations and waits when a socket would block.
+ * Handles partial reads/writes and detects early peer disconnects.
  *
- * All sockets are owned by Socket objects, so failures release resources.
+ * MSG_NOSIGNAL prevents a failed send from terminating the process
+ * with SIGPIPE. MSG_DONTWAIT keeps individual transfer calls nonblocking.
  */
 
 #include "collective/tcp.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <stdexcept>
@@ -24,6 +27,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr std::size_t max_syscall_bytes = 1024 * 1024;
+
 [[noreturn]] void fail_errno(const char* operation) {
     const int error = errno;
 
@@ -36,7 +41,7 @@ using Clock = std::chrono::steady_clock;
 [[noreturn]] void fail_timeout() {
     throw std::system_error(
         std::make_error_code(std::errc::timed_out),
-        "TCP connection deadline expired");
+        "TCP deadline expired");
 }
 
 Clock::time_point make_deadline(std::chrono::milliseconds timeout) {
@@ -48,7 +53,28 @@ Clock::time_point make_deadline(std::chrono::milliseconds timeout) {
     return Clock::now() + timeout;
 }
 
+void check_deadline(Clock::time_point deadline) {
+    if (Clock::now() >= deadline) {
+        fail_timeout();
+    }
+}
+
+void require_socket(const Socket& socket) {
+    if (!socket.valid()) {
+        throw std::invalid_argument("operation requires a valid socket");
+    }
+}
+
+void validate_buffer(const void* buffer, std::size_t byte_count) {
+    if (buffer == nullptr && byte_count != 0) {
+        throw std::invalid_argument(
+            "nonempty transfer requires a nonnull buffer");
+    }
+}
+
 void make_nonblocking(const Socket& socket) {
+    require_socket(socket);
+
     const int fd = socket.native_handle();
     const int flags = ::fcntl(fd, F_GETFL);
 
@@ -70,6 +96,10 @@ sockaddr_in loopback_address(std::uint16_t port) {
     return address;
 }
 
+bool would_block(int error) {
+    return error == EAGAIN || error == EWOULDBLOCK;
+}
+
 void wait_ready(
     int fd,
     short events,
@@ -85,8 +115,6 @@ void wait_ready(
             fail_timeout();
         }
 
-        // Round upward to avoid turning a positive remaining duration
-        // into a zero-millisecond busy wait.
         const auto remaining =
             std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
 
@@ -117,7 +145,8 @@ void wait_ready(
                 "poll reported an invalid socket");
         }
 
-        // Let the next socket operation report a detailed error.
+        // The following socket call diagnoses errors or a peer shutdown.
+        // A readable socket can contain buffered data even after shutdown.
         if ((descriptor.revents &
              (events | POLLERR | POLLHUP)) != 0) {
             return;
@@ -158,9 +187,30 @@ Socket listen_loopback(std::uint16_t port) {
     return listener;
 }
 
+std::uint16_t local_port(const Socket& socket) {
+    require_socket(socket);
+
+    sockaddr_in address{};
+    socklen_t length = sizeof(address);
+
+    if (::getsockname(
+            socket.native_handle(),
+            reinterpret_cast<sockaddr*>(&address),
+            &length) == -1) {
+        fail_errno("reading local socket address");
+    }
+
+    if (address.sin_family != AF_INET) {
+        throw std::runtime_error("expected an IPv4 socket");
+    }
+
+    return ntohs(address.sin_port);
+}
+
 Socket accept_connection(
     const Socket& listener,
     std::chrono::milliseconds timeout) {
+    require_socket(listener);
     const auto deadline = make_deadline(timeout);
 
     for (;;) {
@@ -179,8 +229,7 @@ Socket accept_connection(
         const int error = errno;
 
         if (error == EINTR ||
-            error == EAGAIN ||
-            error == EWOULDBLOCK ||
+            would_block(error) ||
             error == ECONNABORTED) {
             continue;
         }
@@ -192,6 +241,10 @@ Socket accept_connection(
 Socket connect_loopback(
     std::uint16_t port,
     std::chrono::milliseconds timeout) {
+    if (port == 0) {
+        throw std::invalid_argument("destination port must be nonzero");
+    }
+
     const auto deadline = make_deadline(timeout);
     auto socket = Socket::tcp();
     make_nonblocking(socket);
@@ -235,6 +288,103 @@ Socket connect_loopback(
     }
 
     return socket;
+}
+
+void send_all(
+    const Socket& socket,
+    const void* buffer,
+    std::size_t byte_count,
+    std::chrono::milliseconds timeout) {
+    require_socket(socket);
+    validate_buffer(buffer, byte_count);
+    const auto deadline = make_deadline(timeout);
+
+    const auto* bytes = static_cast<const unsigned char*>(buffer);
+    std::size_t completed = 0;
+
+    while (completed < byte_count) {
+        check_deadline(deadline);
+
+        const auto request =
+            std::min(byte_count - completed, max_syscall_bytes);
+
+        const auto sent = ::send(
+            socket.native_handle(),
+            bytes + completed,
+            request,
+            MSG_DONTWAIT | MSG_NOSIGNAL);
+
+        if (sent > 0) {
+            completed += static_cast<std::size_t>(sent);
+            continue;
+        }
+
+        if (sent == 0) {
+            throw std::runtime_error("send made no progress");
+        }
+
+        const int error = errno;
+
+        if (error == EINTR) {
+            continue;
+        }
+
+        if (would_block(error)) {
+            wait_ready(socket.native_handle(), POLLOUT, deadline);
+            continue;
+        }
+
+        fail_errno("sending TCP bytes");
+    }
+}
+
+void receive_exact(
+    const Socket& socket,
+    void* buffer,
+    std::size_t byte_count,
+    std::chrono::milliseconds timeout) {
+    require_socket(socket);
+    validate_buffer(buffer, byte_count);
+    const auto deadline = make_deadline(timeout);
+
+    auto* bytes = static_cast<unsigned char*>(buffer);
+    std::size_t completed = 0;
+
+    while (completed < byte_count) {
+        check_deadline(deadline);
+
+        const auto request =
+            std::min(byte_count - completed, max_syscall_bytes);
+
+        const auto received = ::recv(
+            socket.native_handle(),
+            bytes + completed,
+            request,
+            MSG_DONTWAIT);
+
+        if (received > 0) {
+            completed += static_cast<std::size_t>(received);
+            continue;
+        }
+
+        if (received == 0) {
+            throw std::runtime_error(
+                "peer closed connection before transfer completed");
+        }
+
+        const int error = errno;
+
+        if (error == EINTR) {
+            continue;
+        }
+
+        if (would_block(error)) {
+            wait_ready(socket.native_handle(), POLLIN, deadline);
+            continue;
+        }
+
+        fail_errno("receiving TCP bytes");
+    }
 }
 
 }  // namespace collective
