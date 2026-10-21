@@ -1,6 +1,6 @@
 # Builds the collective communication library, examples, and tests.
-# Includes TCP transport, ring topology, and floating-point ring all-reduce.
-# Threads support concurrent sending and receiving during reduction rounds.
+# Includes numerical correctness, transport stress, topology checks,
+# and controlled failures during active collective operations.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -88,6 +88,12 @@ if(BUILD_TESTING)
     add_executable(tcp_transfer_test tests/tcp_transfer_test.cpp)
     target_link_libraries(tcp_transfer_test PRIVATE collective)
 
+    add_executable(
+        allreduce_failure_worker
+        tests/allreduce_failure_worker.cpp
+    )
+    target_link_libraries(allreduce_failure_worker PRIVATE collective)
+
     add_test(NAME reference_sum COMMAND reference_test)
     add_test(NAME socket_ownership COMMAND socket_test)
     add_test(NAME tcp_transfer COMMAND tcp_transfer_test)
@@ -116,6 +122,14 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:allreduce_demo>"
     )
 
+    add_test(
+        NAME allreduce_failures
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/allreduce_failure_test.py"
+            "$<TARGET_FILE:allreduce_failure_worker>"
+    )
+
     set_tests_properties(
         reference_sum
         socket_ownership
@@ -136,5 +150,10 @@ if(BUILD_TESTING)
     set_tests_properties(
         allreduce_integration
         PROPERTIES TIMEOUT 240 ENVIRONMENT "LC_ALL=C"
+    )
+
+    set_tests_properties(
+        allreduce_failures
+        PROPERTIES TIMEOUT 90 ENVIRONMENT "LC_ALL=C"
     )
 endif()
