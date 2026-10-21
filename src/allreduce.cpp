@@ -4,33 +4,31 @@
  * Reduce-scatter adds incoming chunks to local data.
  * All-gather copies completed chunks into their final positions.
  *
- * Each round sends concurrently with receiving, avoiding a ring in which
- * every process blocks while trying to send a large payload.
+ * A single-threaded poll loop advances sending and receiving together.
+ * This avoids creating a sender task for every exchange round while
+ * preserving progress when outgoing socket buffers fill.
  *
- * Frames include operation, phase, round, chunk, and length metadata.
- * Metadata is checked before receiving the corresponding payload.
- *
- * Scratch buffers are allocated once per collective and reused across rounds.
- * Doubles are encoded as big-endian 64-bit bit patterns using memcpy.
+ * Frames validate operation, phase, round, chunk, and length metadata.
+ * Scratch buffers are allocated once per collective and reused.
+ * Floating-point bit patterns are encoded in big-endian byte order.
  */
 
 #include "collective/allreduce.hpp"
-#include "collective/tcp.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
-#include <future>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
 
 #include <endian.h>
+#include <poll.h>
 #include <sys/socket.h>
 
 namespace collective {
@@ -42,10 +40,14 @@ static_assert(std::numeric_limits<double>::is_iec559);
 using Clock = std::chrono::steady_clock;
 using Header = std::array<std::uint64_t, 7>;
 
+static_assert(sizeof(Header) == 7 * sizeof(std::uint64_t));
+
 constexpr std::uint64_t frame_magic = 0x43434131;
 constexpr std::uint64_t reduce_scatter_phase = 1;
 constexpr std::uint64_t all_gather_phase = 2;
+
 constexpr std::size_t max_elements = 16 * 1024 * 1024;
+constexpr std::size_t max_syscall_bytes = 1024 * 1024;
 
 struct Chunk {
     std::size_t offset;
@@ -89,7 +91,7 @@ void abort_ring(const Ring& ring) noexcept {
     }
 }
 
-std::chrono::milliseconds remaining_timeout(Clock::time_point deadline) {
+int remaining_milliseconds(Clock::time_point deadline) {
     const auto now = Clock::now();
 
     if (now >= deadline) {
@@ -98,7 +100,81 @@ std::chrono::milliseconds remaining_timeout(Clock::time_point deadline) {
             "allreduce round deadline expired");
     }
 
-    return std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+    const auto remaining =
+        std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+
+    return static_cast<int>(remaining.count());
+}
+
+bool retryable(int error) {
+    return error == EINTR ||
+           error == EAGAIN ||
+           error == EWOULDBLOCK;
+}
+
+std::size_t try_send(
+    int fd,
+    const unsigned char* bytes,
+    std::size_t remaining) {
+    const auto request = std::min(remaining, max_syscall_bytes);
+
+    const auto result = ::send(
+        fd,
+        bytes,
+        request,
+        MSG_DONTWAIT | MSG_NOSIGNAL);
+
+    if (result > 0) {
+        return static_cast<std::size_t>(result);
+    }
+
+    if (result == 0) {
+        throw std::runtime_error("send made no progress");
+    }
+
+    const int error = errno;
+
+    if (retryable(error)) {
+        return 0;
+    }
+
+    throw std::system_error(
+        error,
+        std::generic_category(),
+        "sending allreduce frame");
+}
+
+std::size_t try_receive(
+    int fd,
+    unsigned char* bytes,
+    std::size_t remaining) {
+    const auto request = std::min(remaining, max_syscall_bytes);
+
+    const auto result = ::recv(
+        fd,
+        bytes,
+        request,
+        MSG_DONTWAIT);
+
+    if (result > 0) {
+        return static_cast<std::size_t>(result);
+    }
+
+    if (result == 0) {
+        throw std::runtime_error(
+            "peer closed connection before transfer completed");
+    }
+
+    const int error = errno;
+
+    if (retryable(error)) {
+        return 0;
+    }
+
+    throw std::system_error(
+        error,
+        std::generic_category(),
+        "receiving allreduce frame");
 }
 
 class Reduction {
@@ -135,6 +211,12 @@ public:
             send_chunk_index,
             send_chunk.count);
 
+        const auto expected_header = make_header(
+            phase,
+            step,
+            receive_chunk_index,
+            receive_chunk.count);
+
         for (std::size_t index = 0; index < outgoing_header.size(); ++index) {
             send_buffer_[index] = htobe64(outgoing_header[index]);
         }
@@ -149,69 +231,120 @@ public:
         const auto outgoing_bytes =
             (header_words + send_chunk.count) * sizeof(std::uint64_t);
 
+        const auto incoming_payload_bytes =
+            receive_chunk.count * sizeof(std::uint64_t);
+
+        const auto* outgoing_data =
+            reinterpret_cast<const unsigned char*>(send_buffer_.data());
+
+        Header incoming_header{};
+
+        auto* incoming_header_data =
+            reinterpret_cast<unsigned char*>(incoming_header.data());
+
+        std::size_t sent = 0;
+        std::size_t header_received = 0;
+        std::size_t payload_received = 0;
+        bool header_checked = false;
+
         const auto deadline = Clock::now() + timeout_;
 
-        // Snapshot data is already in send_buffer_, so receiving and updating
-        // values_ cannot race with the sender's reads.
-        auto sender = std::async(
-            std::launch::async,
-            [this, outgoing_bytes, deadline] {
-                send_all(
-                    ring_.outgoing,
-                    send_buffer_.data(),
-                    outgoing_bytes,
-                    remaining_timeout(deadline));
-            });
+        for (;;) {
+            const bool send_complete = sent == outgoing_bytes;
 
-        try {
-            Header incoming_header{};
+            const bool receive_complete =
+                header_checked &&
+                payload_received == incoming_payload_bytes;
 
-            receive_exact(
-                ring_.incoming,
-                incoming_header.data(),
-                sizeof(incoming_header),
-                remaining_timeout(deadline));
-
-            for (auto& field : incoming_header) {
-                field = be64toh(field);
+            if (send_complete && receive_complete) {
+                break;
             }
 
-            const auto expected_header = make_header(
-                phase,
-                step,
-                receive_chunk_index,
-                receive_chunk.count);
+            std::array<pollfd, 2> descriptors{};
 
-            if (incoming_header != expected_header) {
-                throw std::runtime_error(
-                    "allreduce frame metadata mismatch");
+            // Completed directions are disabled rather than repeatedly
+            // polling a writable socket with nothing left to send.
+            descriptors[0].fd =
+                send_complete ? -1 : ring_.outgoing.native_handle();
+            descriptors[0].events = POLLOUT;
+
+            descriptors[1].fd =
+                receive_complete ? -1 : ring_.incoming.native_handle();
+            descriptors[1].events = POLLIN;
+
+            const int result = ::poll(
+                descriptors.data(),
+                static_cast<nfds_t>(descriptors.size()),
+                remaining_milliseconds(deadline));
+
+            if (result == -1) {
+                const int error = errno;
+
+                if (error == EINTR) {
+                    continue;
+                }
+
+                throw std::system_error(
+                    error,
+                    std::generic_category(),
+                    "polling allreduce connections");
             }
 
-            // The receive size comes from our validated local partition,
-            // never directly from an untrusted received length.
-            receive_exact(
-                ring_.incoming,
-                receive_buffer_.data(),
-                receive_chunk.count * sizeof(std::uint64_t),
-                remaining_timeout(deadline));
+            if (result == 0) {
+                continue;
+            }
 
-            // Finish sending before reusing the scratch buffer.
-            sender.get();
-        } catch (...) {
-            const auto failure = std::current_exception();
-
-            // Wake a sender that may be waiting for buffer space.
-            abort_ring(ring_);
-
-            if (sender.valid()) {
-                try {
-                    sender.get();
-                } catch (...) {
-                    // Preserve the original failure.
+            for (const auto& descriptor : descriptors) {
+                if ((descriptor.revents & POLLNVAL) != 0) {
+                    throw std::system_error(
+                        std::make_error_code(std::errc::bad_file_descriptor),
+                        "invalid allreduce socket");
                 }
             }
 
-            std::rethrow_exception(failure);
+            // Advance each direction by at most one bounded syscall.
+            // Neither direction must finish before the other progresses.
+            if (!send_complete &&
+                (descriptors[0].revents &
+                 (POLLOUT | POLLERR | POLLHUP)) != 0) {
+                sent += try_send(
+                    ring_.outgoing.native_handle(),
+                    outgoing_data + sent,
+                    outgoing_bytes - sent);
+            }
+
+            if (!receive_complete &&
+                (descriptors[1].revents &
+                 (POLLIN | POLLERR | POLLHUP)) != 0) {
+                if (!header_checked) {
+                    header_received += try_receive(
+                        ring_.incoming.native_handle(),
+                        incoming_header_data + header_received,
+                        sizeof(incoming_header) - header_received);
+
+                    if (header_received == sizeof(incoming_header)) {
+                        for (auto& field : incoming_header) {
+                            field = be64toh(field);
+                        }
+
+                        if (incoming_header != expected_header) {
+                            throw std::runtime_error(
+                                "allreduce frame metadata mismatch");
+                        }
+
+                        header_checked = true;
+                    }
+                } else if (payload_received < incoming_payload_bytes) {
+                    auto* incoming_payload_data =
+                        reinterpret_cast<unsigned char*>(
+                            receive_buffer_.data());
+
+                    payload_received += try_receive(
+                        ring_.incoming.native_handle(),
+                        incoming_payload_data + payload_received,
+                        incoming_payload_bytes - payload_received);
+                }
+            }
         }
 
         for (std::size_t index = 0; index < receive_chunk.count; ++index) {
@@ -288,7 +421,6 @@ void allreduce_sum(
         const auto rank = ring.rank;
         const auto world = ring.world_size;
 
-        // After these rounds, rank r owns completed chunk (r + 1) % world.
         for (std::size_t step = 0; step < world - 1; ++step) {
             const auto send_chunk = (rank + world - step) % world;
             const auto receive_chunk = (rank + world - step - 1) % world;
@@ -300,7 +432,6 @@ void allreduce_sum(
                 receive_chunk);
         }
 
-        // Circulate completed chunks until every rank has every chunk.
         for (std::size_t step = 0; step < world - 1; ++step) {
             const auto send_chunk = (rank + 1 + world - step) % world;
             const auto receive_chunk = (rank + world - step) % world;
