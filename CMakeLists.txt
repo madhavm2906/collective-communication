@@ -52,10 +52,20 @@ target_link_libraries(collective PUBLIC collective_options)
 
 include(CTest)
 
+# Build and register the reference and Linux socket ownership tests.
 if(BUILD_TESTING)
     add_executable(reference_test tests/reference_test.cpp)
     target_link_libraries(reference_test PRIVATE collective)
 
+    add_executable(socket_test tests/socket_test.cpp)
+    target_link_libraries(socket_test PRIVATE collective)
+
     add_test(NAME reference_sum COMMAND reference_test)
-    set_tests_properties(reference_sum PROPERTIES TIMEOUT 30)
+    add_test(NAME socket_ownership COMMAND socket_test)
+
+    set_tests_properties(
+        reference_sum
+        socket_ownership
+        PROPERTIES TIMEOUT 30
+    )
 endif()
